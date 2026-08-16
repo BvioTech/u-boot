@@ -6,6 +6,12 @@ config TARGET_EVB_RK3576
 	help
 	  RK3576 EVB is a evaluation board for Rockchp RK3576.
 
+config TARGET_VIOLOOP_RK3576_TL_V4
+	bool "VIOLOOP_RK3576_TL_V4"
+	select BOARD_LATE_INIT
+	help
+	  Violoop RK3576 TL V4 product hardware.
+
 config SYS_SOC
 	default "rockchip"
 
@@ -13,5 +19,6 @@ config SYS_MALLOC_F_LEN
 	default 0x400
 
 source board/rockchip/evb_rk3576/Kconfig
+source board/rockchip/violoop_rk3576_tl_v4/Kconfig
 
 endif

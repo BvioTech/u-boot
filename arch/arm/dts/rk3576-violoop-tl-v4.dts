@@ -1,0 +1,52 @@
+// SPDX-License-Identifier: (GPL-2.0+ OR MIT)
+/*
+ * Copyright (c) 2023 Rockchip Electronics Co., Ltd.
+ */
+
+/dts-v1/;
+#include "rk3576.dtsi"
+#include "rk3576-u-boot.dtsi"
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/input/input.h>
+
+/ {
+	model = "Violoop RK3576 TL V4";
+	compatible = "violoop,rk3576-tl-v4", "rockchip,rk3576";
+
+	adc-keys {
+		compatible = "adc-keys";
+		io-channels = <&saradc 1>;
+		io-channel-names = "buttons";
+		keyup-threshold-microvolt = <1800000>;
+		u-boot,dm-pre-reloc;
+		status = "okay";
+
+		volumeup-key {
+			u-boot,dm-pre-reloc;
+			linux,code = <KEY_VOLUMEUP>;
+			label = "volume up";
+			press-threshold-microvolt = <1750>;
+		};
+	};
+};
+
+/* Keep the TL V4 fan control inactive until Linux takes ownership. */
+&gpio4 {
+	u-boot,dm-spl;
+	u-boot,dm-pre-reloc;
+
+	fan-pwm-off-hog {
+		gpio-hog;
+		gpios = <RK_PC0 GPIO_ACTIVE_HIGH>;
+		output-low;
+		line-name = "fan-pwm-off";
+		u-boot,dm-spl;
+		u-boot,dm-pre-reloc;
+	};
+};
+
+/* KM8V7001JM-B810 exposes UFS as the only soldered boot storage. */
+&ufs {
+	u-boot,dm-spl;
+	status = "okay";
+};

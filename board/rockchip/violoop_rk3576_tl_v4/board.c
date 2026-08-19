@@ -19,32 +19,42 @@
 DECLARE_GLOBAL_DATA_PTR;
 
 #define TL_V4_LCD_ID_CHANNEL		2
-#define TL_V4_LCD_ID_SAMPLES		8
-#define TL_V4_LCD_ID_MIN_VALID_SAMPLES	5
+#define TL_V4_LCD_ID_SAMPLES		15
+#define TL_V4_LCD_ID_MIN_VALID_SAMPLES	9
+/*
+ * SARADC channel 1 is sampled before LCD-ID channel 2 during boot.  Discard
+ * the initial conversions and allow the sample-and-hold input to settle so a
+ * grounded LCD-ID is not misclassified as a resistor-coded panel.
+ */
+#define TL_V4_LCD_ID_DISCARD		5
+#define TL_V4_LCD_ID_SETTLE_MS		5
+/* Reject a sample window that is still moving instead of guessing a panel. */
+#define TL_V4_LCD_ID_SPREAD_MAX		120
 
 /*
  * 12-bit SARADC counts with a 1.8 V reference.
  *
- * The TL V4 main board has 10 kOhm pull-up and pull-down resistors, so an
- * empty connector reads about 0.9 V (raw 2048).  JN3929595A adds another
- * 10 kOhm pull-down on the panel FPC; the effective 5 kOhm lower leg reads
- * about 0.6 V (raw 1365).  TTCM03921235 is the measured low-ID population.
+ * TTCM03921235 straps LCD-ID to ground.  JN3929595A leaves a resistor-coded
+ * non-zero level (nominal boards have measured roughly 0.6--0.9 V depending
+ * on the fitted divider).  An empty connector can overlap the Jujing level,
+ * so ADC2 alone cannot safely identify "no panel".  Treat every stable
+ * resistor-coded high level as Jujing; probing a harmless absent panel is
+ * preferable to blanking a fitted Jujing display.
  */
 #define TL_V4_LCD_ID_FPT_MAX		450
 #define TL_V4_LCD_ID_JUJING_MIN		950
-#define TL_V4_LCD_ID_JUJING_MAX		1700
-#define TL_V4_LCD_ID_NO_PANEL_MIN	1800
 
-#define TL_V4_FPT_PANEL_COMPAT		"fpt,ttcm03921235"
+/* LCD-ID selects both the panel command path and its matching touch driver. */
+#define TL_V4_FPT_PANEL_COMPAT		"simple-panel-dsi"
 #define TL_V4_JUJING_PANEL_COMPAT	"jujing,jn3929595a"
 #define TL_V4_FPT_TOUCH_COMPAT		"focaltech,ft3519"
 #define TL_V4_JUJING_TOUCH_COMPAT	"hyn,cst3640"
+#define TL_V4_PANEL_PATH		"/dsi@27d80000/panel@0"
 #define TL_V4_DSI_ROUTE_PATH		"/display-subsystem/route/route-dsi"
 
 enum tl_v4_lcd_type {
 	TL_V4_LCD_FPT,
 	TL_V4_LCD_JUJING,
-	TL_V4_LCD_NONE,
 	TL_V4_LCD_UNKNOWN,
 };
 
@@ -65,28 +75,58 @@ static int tl_v4_adc_single_shot(unsigned int channel, unsigned int *value)
 	return ret;
 }
 
-static int tl_v4_read_lcd_id(unsigned int *average)
+static int tl_v4_read_lcd_id(unsigned int *result)
 {
-	unsigned long sum = 0;
+	unsigned int samples[TL_V4_LCD_ID_SAMPLES];
 	unsigned int value;
+	unsigned int spread;
 	int valid = 0;
-	int i;
+	int i, j;
 
-	/* Discard the first conversion after the ADC becomes active. */
-	tl_v4_adc_single_shot(TL_V4_LCD_ID_CHANNEL, &value);
+	/*
+	 * Drain the sample-and-hold remnant left by the channel 1 conversion
+	 * before any reading is kept.  One discard was not enough.
+	 */
+	for (i = 0; i < TL_V4_LCD_ID_DISCARD; i++) {
+		tl_v4_adc_single_shot(TL_V4_LCD_ID_CHANNEL, &value);
+		mdelay(TL_V4_LCD_ID_SETTLE_MS);
+	}
 
 	for (i = 0; i < TL_V4_LCD_ID_SAMPLES; i++) {
-		if (!tl_v4_adc_single_shot(TL_V4_LCD_ID_CHANNEL, &value)) {
-			sum += value;
-			valid++;
-		}
-		mdelay(2);
+		if (!tl_v4_adc_single_shot(TL_V4_LCD_ID_CHANNEL, &value))
+			samples[valid++] = value;
+		mdelay(TL_V4_LCD_ID_SETTLE_MS);
 	}
 
 	if (valid < TL_V4_LCD_ID_MIN_VALID_SAMPLES)
 		return -EIO;
 
-	*average = DIV_ROUND_CLOSEST(sum, valid);
+	/* Insertion sort: tiny array, and it yields both median and spread. */
+	for (i = 1; i < valid; i++) {
+		value = samples[i];
+		for (j = i - 1; j >= 0 && samples[j] > value; j--)
+			samples[j + 1] = samples[j];
+		samples[j + 1] = value;
+	}
+
+	spread = samples[valid - 1] - samples[0];
+
+	/* Leave the distribution in the boot log; a mean hid this for months. */
+	printf("TL V4 LCD-ID: %d samples min=%u median=%u max=%u spread=%u\n",
+	       valid, samples[0], samples[valid / 2], samples[valid - 1],
+	       spread);
+
+	if (spread > TL_V4_LCD_ID_SPREAD_MAX) {
+		printf("TL V4 LCD-ID: spread %u over %u, line still settling\n",
+		       spread, TL_V4_LCD_ID_SPREAD_MAX);
+		return -EIO;
+	}
+
+	/*
+	 * Median, not mean.  A handful of unsettled conversions must not be
+	 * able to drag the result across a classification threshold.
+	 */
+	*result = samples[valid / 2];
 	return 0;
 }
 
@@ -94,11 +134,8 @@ static enum tl_v4_lcd_type tl_v4_classify_lcd(unsigned int raw)
 {
 	if (raw <= TL_V4_LCD_ID_FPT_MAX)
 		return TL_V4_LCD_FPT;
-	if (raw >= TL_V4_LCD_ID_JUJING_MIN &&
-	    raw <= TL_V4_LCD_ID_JUJING_MAX)
+	if (raw >= TL_V4_LCD_ID_JUJING_MIN)
 		return TL_V4_LCD_JUJING;
-	if (raw >= TL_V4_LCD_ID_NO_PANEL_MIN)
-		return TL_V4_LCD_NONE;
 
 	return TL_V4_LCD_UNKNOWN;
 }
@@ -107,13 +144,22 @@ static int tl_v4_find_panel(void *blob)
 {
 	int node;
 
-	node = fdt_node_offset_by_compatible(blob, -1,
-					     TL_V4_FPT_PANEL_COMPAT);
+	node = fdt_path_offset(blob, TL_V4_PANEL_PATH);
 	if (node < 0)
 		node = fdt_node_offset_by_compatible(blob, -1,
-					     TL_V4_JUJING_PANEL_COMPAT);
+						     TL_V4_FPT_PANEL_COMPAT);
 
 	return node;
+}
+
+static int tl_v4_set_panel_compatible(void *blob, const char *compatible)
+{
+	int node = tl_v4_find_panel(blob);
+
+	if (node < 0)
+		return node;
+
+	return fdt_setprop_string(blob, node, "compatible", compatible);
 }
 
 static int tl_v4_set_compatible_status(void *blob, const char *compatible,
@@ -140,8 +186,6 @@ static const char *tl_v4_lcd_name(enum tl_v4_lcd_type type)
 		return "fpt-ttcm03921235";
 	case TL_V4_LCD_JUJING:
 		return "jujing-jn3929595a";
-	case TL_V4_LCD_NONE:
-		return "no-panel";
 	default:
 		return "unknown";
 	}
@@ -162,9 +206,8 @@ int ft_board_setup(void *blob, bd_t *bd)
 	ret = tl_v4_read_lcd_id(&raw);
 	if (ret) {
 		/*
-		 * Preserve the DT's safe, populated-board default on an ADC driver
-		 * error.  Only a valid high ADC reading is allowed to mean no panel;
-		 * a transient read failure must never blank a fitted display.
+		 * Preserve the populated-board default on an ADC error.  A transient
+		 * read failure must not disable a fitted display.
 		 */
 		raw = ~0U;
 		type = TL_V4_LCD_FPT;
@@ -191,6 +234,7 @@ int ft_board_setup(void *blob, bd_t *bd)
 
 	switch (type) {
 	case TL_V4_LCD_FPT:
+		tl_v4_set_panel_compatible(blob, TL_V4_FPT_PANEL_COMPAT);
 		panel = tl_v4_find_panel(blob);
 		fdt_status_okay(blob, panel);
 		tl_v4_set_compatible_status(blob, TL_V4_FPT_TOUCH_COMPAT, true);
@@ -205,29 +249,12 @@ int ft_board_setup(void *blob, bd_t *bd)
 		tl_v4_set_compatible_status(blob, TL_V4_FPT_TOUCH_COMPAT, false);
 		tl_v4_set_compatible_status(blob, TL_V4_JUJING_TOUCH_COMPAT,
 					    true);
+		tl_v4_set_panel_compatible(blob, TL_V4_JUJING_PANEL_COMPAT);
 		panel = tl_v4_find_panel(blob);
 		fdt_status_okay(blob, panel);
-		ret = fdt_setprop_string(blob, panel, "compatible",
-					 TL_V4_JUJING_PANEL_COMPAT);
-		if (ret) {
-			printf("TL V4 LCD-ID: panel compatible update failed: %d\n",
-			       ret);
-			return 0;
-		}
 		route_dsi = fdt_path_offset(blob, TL_V4_DSI_ROUTE_PATH);
 		if (route_dsi >= 0)
 			fdt_status_okay(blob, route_dsi);
-		break;
-	case TL_V4_LCD_NONE:
-		/* Only a valid open/no-panel voltage may disable the display path. */
-		tl_v4_set_compatible_status(blob, TL_V4_FPT_TOUCH_COMPAT, false);
-		tl_v4_set_compatible_status(blob, TL_V4_JUJING_TOUCH_COMPAT,
-					    false);
-		panel = tl_v4_find_panel(blob);
-		fdt_status_disabled(blob, panel);
-		route_dsi = fdt_path_offset(blob, TL_V4_DSI_ROUTE_PATH);
-		if (route_dsi >= 0)
-			fdt_status_disabled(blob, route_dsi);
 		break;
 	case TL_V4_LCD_UNKNOWN:
 		/* All unknown values are normalized to the FPT fallback above. */

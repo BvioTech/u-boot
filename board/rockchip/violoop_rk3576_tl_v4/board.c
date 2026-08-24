@@ -26,6 +26,33 @@ DECLARE_GLOBAL_DATA_PTR;
  */
 #define U3PHY_BASE			0x2b010000
 
+/*
+ * 恢复按钮（长按 5 秒 = 恢复出厂）。
+ *
+ * 硬件与检测：按钮接 SARADC 通道 1，按下拉到地。u-boot DTS 的 adc-keys 节点
+ * （io-channels = <&saradc 1>）声明的就是它，mach-rockchip 的
+ * rockchip_dnl_key_pressed() 也读同一路，阈值同为原始值 0..30 —— 这里刻意与
+ * 它保持一致，两处一起改。
+ *
+ * 为什么要接管：RK 原生流程在「按键按下 + 无 VBUS」时置 reboot_mode=recovery-key，
+ * boot_fit 随即改从 recovery 分区加载 FIT。而本产品的分区表没有 recovery 分区
+ * （复位靠擦 overlay，见 os-next docs/partitions.md），那条路会走到
+ * "No recovery partition" 然后启动失败 —— 也就是说不接管的话，**按一下这个按钮
+ * 设备就起不来**。
+ *
+ * 接管方式：在 rk_board_late_init()（跑在 setup_download_mode() 之后）拦下
+ * recovery-key，无条件把 reboot_mode 复位成 normal，再自己做长按确认；确认通过
+ * 就往内核 cmdline 追加标记，由 initramfs 的 overlay-root 执行擦除。
+ * 「按键 + 插 USB → maskrom 下载」那条原生路径不受影响，整机重刷仍走它。
+ */
+#define TL_V4_RECOVERY_KEY_CHANNEL	1
+#define TL_V4_RECOVERY_KEY_MAX_VAL	30	/* 同 KEY_DOWN_MAX_VAL */
+#define TL_V4_RECOVERY_HOLD_MS		5000
+#define TL_V4_RECOVERY_POLL_MS		100
+/* 允许的瞬时抖动：连续这么多次采样读不到按下才判定为松手 */
+#define TL_V4_RECOVERY_RELEASE_SLACK	3
+#define TL_V4_RECOVERY_CMDLINE		"violoop.recovery=1"
+
 #define TL_V4_LCD_ID_CHANNEL		2
 #define TL_V4_LCD_ID_SAMPLES		15
 #define TL_V4_LCD_ID_MIN_VALID_SAMPLES	9
@@ -199,6 +226,76 @@ static const char *tl_v4_lcd_name(enum tl_v4_lcd_type type)
 	}
 }
 
+/* 确认过长按、需要把标记传给内核。仅在本次启动内有效。 */
+static bool tl_v4_recovery_armed;
+
+static bool tl_v4_recovery_key_down(void)
+{
+	unsigned int val;
+
+	if (tl_v4_adc_single_shot(TL_V4_RECOVERY_KEY_CHANNEL, &val))
+		return false;	/* 读不到就当没按，宁可不擦 */
+
+	return val <= TL_V4_RECOVERY_KEY_MAX_VAL;
+}
+
+/*
+ * 长按确认：要求按钮在 TL_V4_RECOVERY_HOLD_MS 内保持按下。
+ * 中途松手即放弃（擦除不可逆，误触代价是用户数据全没，所以取最严的语义）。
+ * 只容忍 TL_V4_RECOVERY_RELEASE_SLACK 次连续读不到的瞬时抖动。
+ */
+static bool tl_v4_recovery_confirm_hold(void)
+{
+	int elapsed = 0;
+	int misses = 0;
+	int last_announced = -1;
+
+	printf("TL V4 recovery: key down, hold %d s to factory reset...\n",
+	       TL_V4_RECOVERY_HOLD_MS / 1000);
+
+	while (elapsed < TL_V4_RECOVERY_HOLD_MS) {
+		mdelay(TL_V4_RECOVERY_POLL_MS);
+		elapsed += TL_V4_RECOVERY_POLL_MS;
+
+		if (tl_v4_recovery_key_down()) {
+			misses = 0;
+		} else if (++misses > TL_V4_RECOVERY_RELEASE_SLACK) {
+			printf("TL V4 recovery: released after %d ms, aborted\n",
+			       elapsed);
+			return false;
+		}
+
+		/* 每秒回显一次，让现场知道还要按多久 */
+		if (elapsed / 1000 != last_announced) {
+			last_announced = elapsed / 1000;
+			printf("TL V4 recovery: %d/%d s\n", last_announced,
+			       TL_V4_RECOVERY_HOLD_MS / 1000);
+		}
+	}
+
+	printf("TL V4 recovery: confirmed, will wipe overlay on this boot\n");
+	return true;
+}
+
+int rk_board_late_init(void)
+{
+	const char *mode = env_get("reboot_mode");
+
+	if (!mode || strcmp(mode, "recovery-key"))
+		return 0;
+
+	/*
+	 * 无条件复位 reboot_mode —— 本板没有 recovery 分区，留着它 boot_fit 会去
+	 * 找不存在的分区然后启动失败。长按确认与否都要清掉。
+	 */
+	env_set("reboot_mode", "normal");
+
+	if (tl_v4_recovery_confirm_hold())
+		tl_v4_recovery_armed = true;
+
+	return 0;
+}
+
 int ft_board_setup(void *blob, bd_t *bd)
 {
 	enum tl_v4_lcd_type type;
@@ -274,6 +371,20 @@ int ft_board_setup(void *blob, bd_t *bd)
 		fdt_setprop_u32(blob, chosen, "violoop,lcd-id-raw", raw);
 		fdt_setprop_string(blob, chosen, "violoop,lcd-panel",
 				   tl_v4_lcd_name(type));
+	}
+
+	/*
+	 * 恢复出厂标记走 cmdline 追加，不新开 /chosen 属性：initramfs 里读
+	 * /proc/cmdline 比解析 DT 简单得多，且 overlay-root 已经是 shell 脚本。
+	 * 必须用 fdt_bootargs_append()——bootargs 是 os-next 在构建期烤进
+	 * resource.img 内那份 dtb 的（见 build-boot.sh），直接 setprop 会把它整条覆盖掉。
+	 */
+	if (tl_v4_recovery_armed) {
+		if (fdt_bootargs_append(blob, TL_V4_RECOVERY_CMDLINE))
+			printf("TL V4 recovery: failed to append cmdline marker\n");
+		else
+			printf("TL V4 recovery: cmdline += %s\n",
+			       TL_V4_RECOVERY_CMDLINE);
 	}
 
 	printf("TL V4 LCD-ID: ADC2 raw=%u, panel=%s\n", raw,

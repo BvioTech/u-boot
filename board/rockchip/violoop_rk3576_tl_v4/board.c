@@ -18,6 +18,14 @@
 
 DECLARE_GLOBAL_DATA_PTR;
 
+/*
+ * USBDP PHY 基址。本仓 u-boot 比 ODM 的 violoop_sdk 基线新：
+ * drivers/phy/phy-rockchip-usbdp.c 的 rockchip_u3phy_uboot_init 已从
+ * 无参改成收一个 fdt_addr_t phy_addr。同芯片的 board/rockchip/evb_rk3576
+ * 用的就是这个值。
+ */
+#define U3PHY_BASE			0x2b010000
+
 #define TL_V4_LCD_ID_CHANNEL		2
 #define TL_V4_LCD_ID_SAMPLES		15
 #define TL_V4_LCD_ID_MIN_VALID_SAMPLES	9
@@ -330,14 +338,14 @@ int board_usb_init(int index, enum usb_init_type init)
 
 	if (rkusb_switch_usb3_enabled()) {
 		dwc3_device_data.maximum_speed = USB_SPEED_SUPER;
-		ret = rockchip_u3phy_uboot_init();
+		ret = rockchip_u3phy_uboot_init(U3PHY_BASE);
 		if (ret) {
 			rkusb_force_to_usb2(true);
 			dwc3_device_data.maximum_speed = USB_SPEED_HIGH;
 		}
 	}
 #else
-	ret = rockchip_u3phy_uboot_init();
+	ret = rockchip_u3phy_uboot_init(U3PHY_BASE);
 	if (ret) {
 		rkusb_force_to_usb2(true);
 		dwc3_device_data.maximum_speed = USB_SPEED_HIGH;

@@ -1,13 +1,13 @@
-if TARGET_VIOLOOP_RK3576_TL_V4
+if TARGET_VIOLOOP_RK3576_VLA11
 
 config SYS_BOARD
-	default "violoop_rk3576_tl_v4"
+	default "violoop_rk3576_vla11"
 
 config SYS_VENDOR
 	default "rockchip"
 
 config SYS_CONFIG_NAME
-	default "violoop_rk3576_tl_v4"
+	default "violoop_rk3576_vla11"
 
 config BOARD_SPECIFIC_OPTIONS
 	def_bool y

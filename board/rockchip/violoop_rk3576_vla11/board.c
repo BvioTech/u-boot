@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0+
 /*
- * Violoop RK3576 TL V4 product board support.
+ * Violoop RK3576 VLA11 product board support.
  *
  * This file is intentionally board-owned. Keep hardware-specific USB and
  * early GPIO policy out of the other Violoop board targets.
@@ -45,26 +45,26 @@ DECLARE_GLOBAL_DATA_PTR;
  * 就往内核 cmdline 追加标记，由 initramfs 的 overlay-root 执行擦除。
  * 「按键 + 插 USB → maskrom 下载」那条原生路径不受影响，整机重刷仍走它。
  */
-#define TL_V4_RECOVERY_KEY_CHANNEL	1
-#define TL_V4_RECOVERY_KEY_MAX_VAL	30	/* 同 KEY_DOWN_MAX_VAL */
-#define TL_V4_RECOVERY_HOLD_MS		5000
-#define TL_V4_RECOVERY_POLL_MS		100
+#define VLA11_RECOVERY_KEY_CHANNEL	1
+#define VLA11_RECOVERY_KEY_MAX_VAL	30	/* 同 KEY_DOWN_MAX_VAL */
+#define VLA11_RECOVERY_HOLD_MS		5000
+#define VLA11_RECOVERY_POLL_MS		100
 /* 允许的瞬时抖动：连续这么多次采样读不到按下才判定为松手 */
-#define TL_V4_RECOVERY_RELEASE_SLACK	3
-#define TL_V4_RECOVERY_CMDLINE		"violoop.recovery=1"
+#define VLA11_RECOVERY_RELEASE_SLACK	3
+#define VLA11_RECOVERY_CMDLINE		"violoop.recovery=1"
 
-#define TL_V4_LCD_ID_CHANNEL		2
-#define TL_V4_LCD_ID_SAMPLES		15
-#define TL_V4_LCD_ID_MIN_VALID_SAMPLES	9
+#define VLA11_LCD_ID_CHANNEL		2
+#define VLA11_LCD_ID_SAMPLES		15
+#define VLA11_LCD_ID_MIN_VALID_SAMPLES	9
 /*
  * SARADC channel 1 is sampled before LCD-ID channel 2 during boot.  Discard
  * the initial conversions and allow the sample-and-hold input to settle so a
  * grounded LCD-ID is not misclassified as a resistor-coded panel.
  */
-#define TL_V4_LCD_ID_DISCARD		5
-#define TL_V4_LCD_ID_SETTLE_MS		5
+#define VLA11_LCD_ID_DISCARD		5
+#define VLA11_LCD_ID_SETTLE_MS		5
 /* Reject a sample window that is still moving instead of guessing a panel. */
-#define TL_V4_LCD_ID_SPREAD_MAX		120
+#define VLA11_LCD_ID_SPREAD_MAX		120
 
 /*
  * 12-bit SARADC counts with a 1.8 V reference.
@@ -76,24 +76,24 @@ DECLARE_GLOBAL_DATA_PTR;
  * resistor-coded high level as Jujing; probing a harmless absent panel is
  * preferable to blanking a fitted Jujing display.
  */
-#define TL_V4_LCD_ID_FPT_MAX		450
-#define TL_V4_LCD_ID_JUJING_MIN		950
+#define VLA11_LCD_ID_FPT_MAX		450
+#define VLA11_LCD_ID_JUJING_MIN		950
 
 /* LCD-ID selects both the panel command path and its matching touch driver. */
-#define TL_V4_FPT_PANEL_COMPAT		"simple-panel-dsi"
-#define TL_V4_JUJING_PANEL_COMPAT	"jujing,jn3929595a"
-#define TL_V4_FPT_TOUCH_COMPAT		"focaltech,ft3519"
-#define TL_V4_JUJING_TOUCH_COMPAT	"hyn,cst3640"
-#define TL_V4_PANEL_PATH		"/dsi@27d80000/panel@0"
-#define TL_V4_DSI_ROUTE_PATH		"/display-subsystem/route/route-dsi"
+#define VLA11_FPT_PANEL_COMPAT		"simple-panel-dsi"
+#define VLA11_JUJING_PANEL_COMPAT	"jujing,jn3929595a"
+#define VLA11_FPT_TOUCH_COMPAT		"focaltech,ft3519"
+#define VLA11_JUJING_TOUCH_COMPAT	"hyn,cst3640"
+#define VLA11_PANEL_PATH		"/dsi@27d80000/panel@0"
+#define VLA11_DSI_ROUTE_PATH		"/display-subsystem/route/route-dsi"
 
-enum tl_v4_lcd_type {
-	TL_V4_LCD_FPT,
-	TL_V4_LCD_JUJING,
-	TL_V4_LCD_UNKNOWN,
+enum vla11_lcd_type {
+	VLA11_LCD_FPT,
+	VLA11_LCD_JUJING,
+	VLA11_LCD_UNKNOWN,
 };
 
-static int tl_v4_adc_single_shot(unsigned int channel, unsigned int *value)
+static int vla11_adc_single_shot(unsigned int channel, unsigned int *value)
 {
 	int ret;
 
@@ -101,7 +101,7 @@ static int tl_v4_adc_single_shot(unsigned int channel, unsigned int *value)
 	 * Keep this in step with rockchip_dnl_key_pressed().  Depending on the
 	 * U-Boot DT/driver version, the RK3576 SARADC uclass device is registered
 	 * as either "saradc" or "adc".  Trying only the former made every LCD-ID
-	 * conversion fail on TL V4 even though ADC2 is physically valid.
+	 * conversion fail on VLA11 even though ADC2 is physically valid.
 	 */
 	ret = adc_channel_single_shot("saradc", channel, value);
 	if (ret)
@@ -110,9 +110,9 @@ static int tl_v4_adc_single_shot(unsigned int channel, unsigned int *value)
 	return ret;
 }
 
-static int tl_v4_read_lcd_id(unsigned int *result)
+static int vla11_read_lcd_id(unsigned int *result)
 {
-	unsigned int samples[TL_V4_LCD_ID_SAMPLES];
+	unsigned int samples[VLA11_LCD_ID_SAMPLES];
 	unsigned int value;
 	unsigned int spread;
 	int valid = 0;
@@ -122,18 +122,18 @@ static int tl_v4_read_lcd_id(unsigned int *result)
 	 * Drain the sample-and-hold remnant left by the channel 1 conversion
 	 * before any reading is kept.  One discard was not enough.
 	 */
-	for (i = 0; i < TL_V4_LCD_ID_DISCARD; i++) {
-		tl_v4_adc_single_shot(TL_V4_LCD_ID_CHANNEL, &value);
-		mdelay(TL_V4_LCD_ID_SETTLE_MS);
+	for (i = 0; i < VLA11_LCD_ID_DISCARD; i++) {
+		vla11_adc_single_shot(VLA11_LCD_ID_CHANNEL, &value);
+		mdelay(VLA11_LCD_ID_SETTLE_MS);
 	}
 
-	for (i = 0; i < TL_V4_LCD_ID_SAMPLES; i++) {
-		if (!tl_v4_adc_single_shot(TL_V4_LCD_ID_CHANNEL, &value))
+	for (i = 0; i < VLA11_LCD_ID_SAMPLES; i++) {
+		if (!vla11_adc_single_shot(VLA11_LCD_ID_CHANNEL, &value))
 			samples[valid++] = value;
-		mdelay(TL_V4_LCD_ID_SETTLE_MS);
+		mdelay(VLA11_LCD_ID_SETTLE_MS);
 	}
 
-	if (valid < TL_V4_LCD_ID_MIN_VALID_SAMPLES)
+	if (valid < VLA11_LCD_ID_MIN_VALID_SAMPLES)
 		return -EIO;
 
 	/* Insertion sort: tiny array, and it yields both median and spread. */
@@ -147,13 +147,13 @@ static int tl_v4_read_lcd_id(unsigned int *result)
 	spread = samples[valid - 1] - samples[0];
 
 	/* Leave the distribution in the boot log; a mean hid this for months. */
-	printf("TL V4 LCD-ID: %d samples min=%u median=%u max=%u spread=%u\n",
+	printf("VLA11 LCD-ID: %d samples min=%u median=%u max=%u spread=%u\n",
 	       valid, samples[0], samples[valid / 2], samples[valid - 1],
 	       spread);
 
-	if (spread > TL_V4_LCD_ID_SPREAD_MAX) {
-		printf("TL V4 LCD-ID: spread %u over %u, line still settling\n",
-		       spread, TL_V4_LCD_ID_SPREAD_MAX);
+	if (spread > VLA11_LCD_ID_SPREAD_MAX) {
+		printf("VLA11 LCD-ID: spread %u over %u, line still settling\n",
+		       spread, VLA11_LCD_ID_SPREAD_MAX);
 		return -EIO;
 	}
 
@@ -165,31 +165,31 @@ static int tl_v4_read_lcd_id(unsigned int *result)
 	return 0;
 }
 
-static enum tl_v4_lcd_type tl_v4_classify_lcd(unsigned int raw)
+static enum vla11_lcd_type vla11_classify_lcd(unsigned int raw)
 {
-	if (raw <= TL_V4_LCD_ID_FPT_MAX)
-		return TL_V4_LCD_FPT;
-	if (raw >= TL_V4_LCD_ID_JUJING_MIN)
-		return TL_V4_LCD_JUJING;
+	if (raw <= VLA11_LCD_ID_FPT_MAX)
+		return VLA11_LCD_FPT;
+	if (raw >= VLA11_LCD_ID_JUJING_MIN)
+		return VLA11_LCD_JUJING;
 
-	return TL_V4_LCD_UNKNOWN;
+	return VLA11_LCD_UNKNOWN;
 }
 
-static int tl_v4_find_panel(void *blob)
+static int vla11_find_panel(void *blob)
 {
 	int node;
 
-	node = fdt_path_offset(blob, TL_V4_PANEL_PATH);
+	node = fdt_path_offset(blob, VLA11_PANEL_PATH);
 	if (node < 0)
 		node = fdt_node_offset_by_compatible(blob, -1,
-						     TL_V4_FPT_PANEL_COMPAT);
+						     VLA11_FPT_PANEL_COMPAT);
 
 	return node;
 }
 
-static int tl_v4_set_panel_compatible(void *blob, const char *compatible)
+static int vla11_set_panel_compatible(void *blob, const char *compatible)
 {
-	int node = tl_v4_find_panel(blob);
+	int node = vla11_find_panel(blob);
 
 	if (node < 0)
 		return node;
@@ -197,7 +197,7 @@ static int tl_v4_set_panel_compatible(void *blob, const char *compatible)
 	return fdt_setprop_string(blob, node, "compatible", compatible);
 }
 
-static int tl_v4_set_compatible_status(void *blob, const char *compatible,
+static int vla11_set_compatible_status(void *blob, const char *compatible,
 				       bool enable)
 {
 	int node;
@@ -214,12 +214,12 @@ static int tl_v4_set_compatible_status(void *blob, const char *compatible,
 		fdt_status_disabled(blob, node);
 }
 
-static const char *tl_v4_lcd_name(enum tl_v4_lcd_type type)
+static const char *vla11_lcd_name(enum vla11_lcd_type type)
 {
 	switch (type) {
-	case TL_V4_LCD_FPT:
+	case VLA11_LCD_FPT:
 		return "fpt-ttcm03921235";
-	case TL_V4_LCD_JUJING:
+	case VLA11_LCD_JUJING:
 		return "jujing-jn3929595a";
 	default:
 		return "unknown";
@@ -227,40 +227,40 @@ static const char *tl_v4_lcd_name(enum tl_v4_lcd_type type)
 }
 
 /* 确认过长按、需要把标记传给内核。仅在本次启动内有效。 */
-static bool tl_v4_recovery_armed;
+static bool vla11_recovery_armed;
 
-static bool tl_v4_recovery_key_down(void)
+static bool vla11_recovery_key_down(void)
 {
 	unsigned int val;
 
-	if (tl_v4_adc_single_shot(TL_V4_RECOVERY_KEY_CHANNEL, &val))
+	if (vla11_adc_single_shot(VLA11_RECOVERY_KEY_CHANNEL, &val))
 		return false;	/* 读不到就当没按，宁可不擦 */
 
-	return val <= TL_V4_RECOVERY_KEY_MAX_VAL;
+	return val <= VLA11_RECOVERY_KEY_MAX_VAL;
 }
 
 /*
- * 长按确认：要求按钮在 TL_V4_RECOVERY_HOLD_MS 内保持按下。
+ * 长按确认：要求按钮在 VLA11_RECOVERY_HOLD_MS 内保持按下。
  * 中途松手即放弃（擦除不可逆，误触代价是用户数据全没，所以取最严的语义）。
- * 只容忍 TL_V4_RECOVERY_RELEASE_SLACK 次连续读不到的瞬时抖动。
+ * 只容忍 VLA11_RECOVERY_RELEASE_SLACK 次连续读不到的瞬时抖动。
  */
-static bool tl_v4_recovery_confirm_hold(void)
+static bool vla11_recovery_confirm_hold(void)
 {
 	int elapsed = 0;
 	int misses = 0;
 	int last_announced = -1;
 
-	printf("TL V4 recovery: key down, hold %d s to factory reset...\n",
-	       TL_V4_RECOVERY_HOLD_MS / 1000);
+	printf("VLA11 recovery: key down, hold %d s to factory reset...\n",
+	       VLA11_RECOVERY_HOLD_MS / 1000);
 
-	while (elapsed < TL_V4_RECOVERY_HOLD_MS) {
-		mdelay(TL_V4_RECOVERY_POLL_MS);
-		elapsed += TL_V4_RECOVERY_POLL_MS;
+	while (elapsed < VLA11_RECOVERY_HOLD_MS) {
+		mdelay(VLA11_RECOVERY_POLL_MS);
+		elapsed += VLA11_RECOVERY_POLL_MS;
 
-		if (tl_v4_recovery_key_down()) {
+		if (vla11_recovery_key_down()) {
 			misses = 0;
-		} else if (++misses > TL_V4_RECOVERY_RELEASE_SLACK) {
-			printf("TL V4 recovery: released after %d ms, aborted\n",
+		} else if (++misses > VLA11_RECOVERY_RELEASE_SLACK) {
+			printf("VLA11 recovery: released after %d ms, aborted\n",
 			       elapsed);
 			return false;
 		}
@@ -268,12 +268,12 @@ static bool tl_v4_recovery_confirm_hold(void)
 		/* 每秒回显一次，让现场知道还要按多久 */
 		if (elapsed / 1000 != last_announced) {
 			last_announced = elapsed / 1000;
-			printf("TL V4 recovery: %d/%d s\n", last_announced,
-			       TL_V4_RECOVERY_HOLD_MS / 1000);
+			printf("VLA11 recovery: %d/%d s\n", last_announced,
+			       VLA11_RECOVERY_HOLD_MS / 1000);
 		}
 	}
 
-	printf("TL V4 recovery: confirmed, will wipe overlay on this boot\n");
+	printf("VLA11 recovery: confirmed, will wipe overlay on this boot\n");
 	return true;
 }
 
@@ -290,15 +290,15 @@ int rk_board_late_init(void)
 	 */
 	env_set("reboot_mode", "normal");
 
-	if (tl_v4_recovery_confirm_hold())
-		tl_v4_recovery_armed = true;
+	if (vla11_recovery_confirm_hold())
+		vla11_recovery_armed = true;
 
 	return 0;
 }
 
 int ft_board_setup(void *blob, bd_t *bd)
 {
-	enum tl_v4_lcd_type type;
+	enum vla11_lcd_type type;
 	unsigned int raw;
 	int panel;
 	int fpt_touch;
@@ -308,60 +308,60 @@ int ft_board_setup(void *blob, bd_t *bd)
 	int ret;
 
 	(void)bd;
-	ret = tl_v4_read_lcd_id(&raw);
+	ret = vla11_read_lcd_id(&raw);
 	if (ret) {
 		/*
 		 * Preserve the populated-board default on an ADC error.  A transient
 		 * read failure must not disable a fitted display.
 		 */
 		raw = ~0U;
-		type = TL_V4_LCD_FPT;
-		printf("TL V4 LCD-ID: ADC2 read failed (%d), use FPT fallback\n",
+		type = VLA11_LCD_FPT;
+		printf("VLA11 LCD-ID: ADC2 read failed (%d), use FPT fallback\n",
 		       ret);
 	} else {
-		type = tl_v4_classify_lcd(raw);
-		if (type == TL_V4_LCD_UNKNOWN) {
-			printf("TL V4 LCD-ID: ADC2 raw=%u is unclassified, use FPT fallback\n",
+		type = vla11_classify_lcd(raw);
+		if (type == VLA11_LCD_UNKNOWN) {
+			printf("VLA11 LCD-ID: ADC2 raw=%u is unclassified, use FPT fallback\n",
 			       raw);
-			type = TL_V4_LCD_FPT;
+			type = VLA11_LCD_FPT;
 		}
 	}
-	panel = tl_v4_find_panel(blob);
+	panel = vla11_find_panel(blob);
 	fpt_touch = fdt_node_offset_by_compatible(blob, -1,
-						 TL_V4_FPT_TOUCH_COMPAT);
+						 VLA11_FPT_TOUCH_COMPAT);
 	jujing_touch = fdt_node_offset_by_compatible(blob, -1,
-						    TL_V4_JUJING_TOUCH_COMPAT);
+						    VLA11_JUJING_TOUCH_COMPAT);
 	if (panel < 0 || fpt_touch < 0 || jujing_touch < 0) {
-		printf("TL V4 LCD-ID: DT nodes missing (%d/%d/%d), keep fallback\n",
+		printf("VLA11 LCD-ID: DT nodes missing (%d/%d/%d), keep fallback\n",
 		       panel, fpt_touch, jujing_touch);
 		return 0;
 	}
 
 	switch (type) {
-	case TL_V4_LCD_FPT:
-		tl_v4_set_panel_compatible(blob, TL_V4_FPT_PANEL_COMPAT);
-		panel = tl_v4_find_panel(blob);
+	case VLA11_LCD_FPT:
+		vla11_set_panel_compatible(blob, VLA11_FPT_PANEL_COMPAT);
+		panel = vla11_find_panel(blob);
 		fdt_status_okay(blob, panel);
-		tl_v4_set_compatible_status(blob, TL_V4_FPT_TOUCH_COMPAT, true);
-		tl_v4_set_compatible_status(blob, TL_V4_JUJING_TOUCH_COMPAT,
+		vla11_set_compatible_status(blob, VLA11_FPT_TOUCH_COMPAT, true);
+		vla11_set_compatible_status(blob, VLA11_JUJING_TOUCH_COMPAT,
 					    false);
-		route_dsi = fdt_path_offset(blob, TL_V4_DSI_ROUTE_PATH);
+		route_dsi = fdt_path_offset(blob, VLA11_DSI_ROUTE_PATH);
 		if (route_dsi >= 0)
 			fdt_status_okay(blob, route_dsi);
 		break;
-	case TL_V4_LCD_JUJING:
+	case VLA11_LCD_JUJING:
 		/* Touch status changes can move the later node offsets. */
-		tl_v4_set_compatible_status(blob, TL_V4_FPT_TOUCH_COMPAT, false);
-		tl_v4_set_compatible_status(blob, TL_V4_JUJING_TOUCH_COMPAT,
+		vla11_set_compatible_status(blob, VLA11_FPT_TOUCH_COMPAT, false);
+		vla11_set_compatible_status(blob, VLA11_JUJING_TOUCH_COMPAT,
 					    true);
-		tl_v4_set_panel_compatible(blob, TL_V4_JUJING_PANEL_COMPAT);
-		panel = tl_v4_find_panel(blob);
+		vla11_set_panel_compatible(blob, VLA11_JUJING_PANEL_COMPAT);
+		panel = vla11_find_panel(blob);
 		fdt_status_okay(blob, panel);
-		route_dsi = fdt_path_offset(blob, TL_V4_DSI_ROUTE_PATH);
+		route_dsi = fdt_path_offset(blob, VLA11_DSI_ROUTE_PATH);
 		if (route_dsi >= 0)
 			fdt_status_okay(blob, route_dsi);
 		break;
-	case TL_V4_LCD_UNKNOWN:
+	case VLA11_LCD_UNKNOWN:
 		/* All unknown values are normalized to the FPT fallback above. */
 		break;
 	}
@@ -370,7 +370,7 @@ int ft_board_setup(void *blob, bd_t *bd)
 	if (chosen >= 0) {
 		fdt_setprop_u32(blob, chosen, "violoop,lcd-id-raw", raw);
 		fdt_setprop_string(blob, chosen, "violoop,lcd-panel",
-				   tl_v4_lcd_name(type));
+				   vla11_lcd_name(type));
 	}
 
 	/*
@@ -379,16 +379,16 @@ int ft_board_setup(void *blob, bd_t *bd)
 	 * 必须用 fdt_bootargs_append()——bootargs 是 os-next 在构建期烤进
 	 * resource.img 内那份 dtb 的（见 build-boot.sh），直接 setprop 会把它整条覆盖掉。
 	 */
-	if (tl_v4_recovery_armed) {
-		if (fdt_bootargs_append(blob, TL_V4_RECOVERY_CMDLINE))
-			printf("TL V4 recovery: failed to append cmdline marker\n");
+	if (vla11_recovery_armed) {
+		if (fdt_bootargs_append(blob, VLA11_RECOVERY_CMDLINE))
+			printf("VLA11 recovery: failed to append cmdline marker\n");
 		else
-			printf("TL V4 recovery: cmdline += %s\n",
-			       TL_V4_RECOVERY_CMDLINE);
+			printf("VLA11 recovery: cmdline += %s\n",
+			       VLA11_RECOVERY_CMDLINE);
 	}
 
-	printf("TL V4 LCD-ID: ADC2 raw=%u, panel=%s\n", raw,
-	       tl_v4_lcd_name(type));
+	printf("VLA11 LCD-ID: ADC2 raw=%u, panel=%s\n", raw,
+	       vla11_lcd_name(type));
 	return 0;
 }
 

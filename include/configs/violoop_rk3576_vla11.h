@@ -1,7 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0+ */
 
-#ifndef __CONFIGS_VIOLOOP_RK3576_TL_V4_H
-#define __CONFIGS_VIOLOOP_RK3576_TL_V4_H
+#ifndef __CONFIGS_VIOLOOP_RK3576_VLA11_H
+#define __CONFIGS_VIOLOOP_RK3576_VLA11_H
 
 #include <configs/rk3576_common.h>
 
@@ -28,4 +28,4 @@
 #endif
 
 #endif /* CONFIG_SPL_BUILD */
-#endif /* __CONFIGS_VIOLOOP_RK3576_TL_V4_H */
+#endif /* __CONFIGS_VIOLOOP_RK3576_VLA11_H */

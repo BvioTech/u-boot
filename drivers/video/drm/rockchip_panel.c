@@ -26,6 +26,12 @@
 #include "rockchip_connector.h"
 #include "rockchip_panel.h"
 
+#if defined(CONFIG_VIOLOOP_VLA11_LCD_RECOVERY) && \
+    defined(CONFIG_TARGET_VIOLOOP_RK3576_VLA11) && \
+    !defined(CONFIG_SPL_BUILD) && !defined(CONFIG_TPL_BUILD)
+#include <violoop_lcd_recovery.h>
+#endif
+
 struct rockchip_cmd_header {
 	u8 data_type;
 	u8 delay_ms;
@@ -280,6 +286,12 @@ static int rockchip_panel_send_dsi_cmds(struct mipi_dsi_device *dsi,
 			return -EINVAL;
 		}
 
+#if defined(CONFIG_VIOLOOP_VLA11_LCD_RECOVERY) && \
+    defined(CONFIG_TARGET_VIOLOOP_RK3576_VLA11) && \
+    !defined(CONFIG_SPL_BUILD) && !defined(CONFIG_TPL_BUILD)
+		if (header->payload_length)
+			vla11_lcd_record_init_command(desc->payload[0], ret);
+#endif
 		if (ret < 0) {
 			printf("failed to write cmd%d: %d\n", i, ret);
 			return ret;
@@ -317,8 +329,18 @@ static void panel_simple_prepare(struct rockchip_panel *panel)
 	if (plat->delay.reset)
 		mdelay(plat->delay.reset);
 
-	if (dm_gpio_is_valid(&priv->reset_gpio))
+	if (dm_gpio_is_valid(&priv->reset_gpio)) {
+#if defined(CONFIG_VIOLOOP_VLA11_LCD_RECOVERY) && \
+    defined(CONFIG_TARGET_VIOLOOP_RK3576_VLA11) && \
+    !defined(CONFIG_SPL_BUILD) && !defined(CONFIG_TPL_BUILD)
+		int lcd_reset_ret = dm_gpio_set_value(&priv->reset_gpio, 0);
+
+		if (!lcd_reset_ret)
+			vla11_lcd_record_reset_release();
+#else
 		dm_gpio_set_value(&priv->reset_gpio, 0);
+#endif
+	}
 
 	if (plat->delay.init)
 		mdelay(plat->delay.init);

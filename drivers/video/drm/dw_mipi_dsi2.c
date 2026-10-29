@@ -30,6 +30,12 @@
 #include "rockchip_panel.h"
 #include "rockchip_phy.h"
 
+#if defined(CONFIG_VIOLOOP_VLA11_LCD_RECOVERY) && \
+    defined(CONFIG_TARGET_VIOLOOP_RK3576_VLA11) && \
+    !defined(CONFIG_SPL_BUILD) && !defined(CONFIG_TPL_BUILD)
+#include <violoop_lcd_recovery.h>
+#endif
+
 #define UPDATE(v, h, l)		(((v) << (l)) & GENMASK((h), (l)))
 
 #define DSI2_PWR_UP			0x000c
@@ -543,6 +549,277 @@ static ssize_t dw_mipi_dsi2_transfer(struct dw_mipi_dsi2 *dsi2,
 
 	return msg->rx_len ? msg->rx_len : msg->tx_len;
 }
+
+#if defined(CONFIG_VIOLOOP_VLA11_LCD_RECOVERY) && \
+    defined(CONFIG_TARGET_VIOLOOP_RK3576_VLA11) && \
+    !defined(CONFIG_SPL_BUILD) && !defined(CONFIG_TPL_BUILD)
+
+#define VLA11_LCD_READ_TIMEOUT_US		50000
+#define VLA11_LCD_WRITE_TIMEOUT_US	20000
+#define VLA11_LCD_CLEANUP_TIMEOUT_US	5000
+#define VLA11_LCD_CRI_PENDING		(CRI_BUSY | CRT_FIFOS_NOT_EMPTY | \
+					 CRI_RD_DATA_AVAIL)
+
+/* Keep this transport separate from the ordinary initialization transfer. */
+static int vla11_lcd_host(struct display_state *state,
+			  struct dw_mipi_dsi2 **host)
+{
+	struct rockchip_connector *conn;
+	struct dw_mipi_dsi2 *dsi2;
+
+	if (!state || !host)
+		return -EINVAL;
+	conn = state->conn_state.connector;
+	if (!conn || !conn->dev || conn->type != DRM_MODE_CONNECTOR_DSI ||
+	    state->conn_state.type != DRM_MODE_CONNECTOR_DSI || conn->id != 0 ||
+	    !device_is_compatible(conn->dev, "rockchip,rk3576-mipi-dsi2"))
+		return -ENODEV;
+
+	/* Validate the bound device before using its private host structure. */
+	dsi2 = dev_get_priv(conn->dev);
+	if (!dsi2 || &dsi2->connector != conn || dsi2->dev != conn->dev ||
+	    !dsi2->base || dsi2->id != 0 || !dsi2->device ||
+	    !dsi2->device->host || dsi2->device->host->dev != conn->dev ||
+	    dsi2->master || dsi2->slave ||
+	    dsi2->dual_channel || dsi2->c_option || dsi2->dsc_enable ||
+	    dsi2->channel > 3 || dsi2->lanes != 4 ||
+	    dsi2->format != MIPI_DSI_FMT_RGB888)
+		return -EOPNOTSUPP;
+	if (!state->is_init || !state->is_enable || !dsi2->prepared)
+		return -EAGAIN;
+	*host = dsi2;
+	return 0;
+}
+
+int vla11_lcd_dsi_snapshot(struct display_state *state,
+			  struct vla11_lcd_dsi_snapshot *snapshot)
+{
+	struct dw_mipi_dsi2 *dsi2;
+	int ret;
+
+	if (!snapshot)
+		return -EINVAL;
+	ret = vla11_lcd_host(state, &dsi2);
+	if (ret)
+		return ret;
+	snapshot->power = dsi_read(dsi2, DSI2_PWR_UP);
+	snapshot->reset = dsi_read(dsi2, DSI2_SOFT_RESET);
+	snapshot->mode = dsi_read(dsi2, DSI2_MODE_STATUS);
+	snapshot->core = dsi_read(dsi2, DSI2_CORE_STATUS);
+	snapshot->phy_clock = dsi_read(dsi2, DSI2_PHY_CLK_CFG);
+	snapshot->video = dsi_read(dsi2, DSI2_DSI_VID_TX_CFG);
+	snapshot->general = dsi_read(dsi2, DSI2_DSI_GENERAL_CFG);
+	snapshot->ipi = dsi_read(dsi2, DSI2_IPI_PIX_PKT_CFG);
+	snapshot->vc = dsi_read(dsi2, DSI2_DSI_VCID_CFG) & 3;
+	return 0;
+}
+
+static void vla11_lcd_restore_bits(struct dw_mipi_dsi2 *dsi2, u32 reg,
+				   u32 mask, u32 saved)
+{
+	u32 current = dsi_read(dsi2, reg);
+	u32 restored = (current & ~mask) | (saved & mask);
+
+	if (current != restored)
+		dsi_write(dsi2, reg, restored);
+}
+
+/* One shared, finite deadline covers submission, receive and final idle. */
+static int vla11_lcd_wait(struct dw_mipi_dsi2 *dsi2, u32 mask, u32 expected,
+			  unsigned long started, unsigned int timeout_us)
+{
+	for (;;) {
+		if ((dsi_read(dsi2, DSI2_CORE_STATUS) & mask) == expected)
+			return 0;
+		if ((unsigned long)(timer_get_us() - started) >= timeout_us)
+			return -ETIMEDOUT;
+		udelay(5);
+	}
+}
+
+static int vla11_lcd_cleanup(struct dw_mipi_dsi2 *dsi2, u32 saved_general)
+{
+	u32 status = dsi_read(dsi2, DSI2_CORE_STATUS);
+	unsigned long started;
+
+	/* This caller owned an empty CRI before its single submitted packet. */
+	if (status & CRI_RD_DATA_AVAIL) {
+		u32 header = dsi_read(dsi2, DSI2_CRI_RX_HDR);
+
+		if ((header & 0x3f) == MIPI_DSI_RX_DCS_LONG_READ_RESPONSE)
+			return -EPROTO;
+		status = dsi_read(dsi2, DSI2_CORE_STATUS);
+	}
+	if (!(status & VLA11_LCD_CRI_PENDING))
+		return 0;
+	if (!(status & CRI_BUSY) || !(saved_general & BTA_EN))
+		return -EIO;
+
+	/* Abort only this BTA. Never reset the host, PHY, IPI or panel. */
+	vla11_lcd_restore_bits(dsi2, DSI2_DSI_GENERAL_CFG, BTA_EN, 0);
+	udelay(20);
+	vla11_lcd_restore_bits(dsi2, DSI2_DSI_GENERAL_CFG, BTA_EN,
+			       saved_general);
+	started = timer_get_us();
+	return vla11_lcd_wait(dsi2, VLA11_LCD_CRI_PENDING, 0, started,
+			     VLA11_LCD_CLEANUP_TIMEOUT_US);
+}
+
+static int vla11_lcd_xfer(struct display_state *state,
+			   const struct mipi_dsi_msg *msg, unsigned int timeout_us)
+{
+	struct vla11_lcd_dsi_snapshot saved;
+	struct dw_mipi_dsi2 *dsi2;
+	struct mipi_dsi_packet packet;
+	unsigned long started;
+	u32 word, header;
+	u8 received = 0;
+	int ret, cleanup_ret;
+
+	ret = vla11_lcd_dsi_snapshot(state, &saved);
+	if (ret)
+		return ret;
+	ret = vla11_lcd_host(state, &dsi2);
+	if (ret)
+		return ret;
+	if (saved.power != POWER_UP ||
+	    saved.reset != (SYS_RSTN | PHY_RSTN | IPI_RSTN) ||
+	    saved.mode != DATA_STREAM_MODE ||
+	    (saved.phy_clock & CLK_TYPE_MASK) != CONTIUOUS_CLK ||
+	    !(saved.ipi & 0xffff) || saved.vc != dsi2->channel ||
+	    msg->channel != dsi2->channel ||
+	    (msg->rx_len && !(saved.general & BTA_EN)))
+		return -EAGAIN;
+	/* Do not consume or abort another transaction's stale reply. */
+	if (saved.core & VLA11_LCD_CRI_PENDING)
+		return -EBUSY;
+	ret = mipi_dsi_create_packet(&packet, msg);
+	if (ret)
+		return ret;
+	if (dsi_read(dsi2, DSI2_CORE_STATUS) & VLA11_LCD_CRI_PENDING)
+		return -EBUSY;
+
+	started = timer_get_us();
+	/* The continuous-clock policy is already valid and is left untouched. */
+	vla11_lcd_restore_bits(dsi2, DSI2_DSI_VID_TX_CFG,
+			       LPDT_DISPLAY_CMD_EN,
+			       msg->flags & MIPI_DSI_MSG_USE_LPM ?
+			       LPDT_DISPLAY_CMD_EN : 0);
+	while (packet.payload_length) {
+		unsigned int count = min_t(unsigned int, packet.payload_length, 4);
+
+		word = 0;
+		memcpy(&word, packet.payload, count);
+		dsi_write(dsi2, DSI2_CRI_TX_PLD, word);
+		packet.payload += count;
+		packet.payload_length -= count;
+	}
+	header = get_unaligned_le32(packet.header);
+	dsi_write(dsi2, DSI2_CRI_TX_HDR,
+		  CMD_TX_MODE(!!(msg->flags & MIPI_DSI_MSG_USE_LPM)) | header);
+
+	if (msg->rx_len) {
+		/* Drain RX before waiting for CRI_BUSY: BTA can depend on it. */
+		ret = vla11_lcd_wait(dsi2, CRI_RD_DATA_AVAIL,
+				     CRI_RD_DATA_AVAIL, started, timeout_us);
+		if (ret)
+			goto failed;
+		header = dsi_read(dsi2, DSI2_CRI_RX_HDR);
+		if ((header & 0x3f) != MIPI_DSI_RX_DCS_SHORT_READ_RESPONSE_1BYTE ||
+		    ((header >> 6) & 3) != msg->channel) {
+			printf("vla11-lcd: invalid DCS reply header=0x%08x\n", header);
+			ret = -EPROTO;
+			goto failed;
+		}
+		received = (header >> 8) & 0xff;
+	}
+	ret = vla11_lcd_wait(dsi2, VLA11_LCD_CRI_PENDING, 0,
+			     started, timeout_us);
+	if (ret)
+		goto failed;
+	ret = 0;
+	goto restore;
+
+failed:
+	cleanup_ret = vla11_lcd_cleanup(dsi2, saved.general);
+	if (cleanup_ret) {
+		printf("vla11-lcd: transaction failed=%d cleanup failed=%d core=0x%08x\n",
+		       ret, cleanup_ret, dsi_read(dsi2, DSI2_CORE_STATUS));
+		ret = -EIO;
+	}
+restore:
+	vla11_lcd_restore_bits(dsi2, DSI2_DSI_VID_TX_CFG,
+			       LPDT_DISPLAY_CMD_EN, saved.video);
+	vla11_lcd_restore_bits(dsi2, DSI2_PHY_CLK_CFG,
+			       CLK_TYPE_MASK, saved.phy_clock);
+	vla11_lcd_restore_bits(dsi2, DSI2_DSI_GENERAL_CFG, BTA_EN, saved.general);
+	if (dsi_read(dsi2, DSI2_PWR_UP) != saved.power ||
+	    dsi_read(dsi2, DSI2_SOFT_RESET) != saved.reset ||
+	    dsi_read(dsi2, DSI2_MODE_STATUS) != saved.mode ||
+	    dsi_read(dsi2, DSI2_IPI_PIX_PKT_CFG) != saved.ipi ||
+	    (dsi_read(dsi2, DSI2_PHY_CLK_CFG) & CLK_TYPE_MASK) !=
+		(saved.phy_clock & CLK_TYPE_MASK) ||
+	    (dsi_read(dsi2, DSI2_DSI_VID_TX_CFG) & LPDT_DISPLAY_CMD_EN) !=
+		(saved.video & LPDT_DISPLAY_CMD_EN) ||
+	    (dsi_read(dsi2, DSI2_DSI_GENERAL_CFG) & BTA_EN) !=
+		(saved.general & BTA_EN))
+		ret = -EIO;
+	if (!ret && msg->rx_len)
+		*(u8 *)msg->rx_buf = received;
+	return ret;
+}
+
+int vla11_lcd_dsi_read(struct display_state *state, u8 command, u8 *value)
+{
+	struct dw_mipi_dsi2 *dsi2;
+	struct mipi_dsi_msg msg = { 0 };
+	int ret;
+
+	if (!value || (command != 0x0a && command != 0x0d))
+		return -EINVAL;
+	ret = vla11_lcd_host(state, &dsi2);
+	if (ret)
+		return ret;
+	msg.channel = dsi2->channel;
+	msg.type = MIPI_DSI_DCS_READ;
+	msg.flags = MIPI_DSI_MSG_USE_LPM;
+	msg.tx_buf = &command;
+	msg.tx_len = 1;
+	msg.rx_buf = value;
+	msg.rx_len = 1;
+	return vla11_lcd_xfer(state, &msg, VLA11_LCD_READ_TIMEOUT_US);
+}
+
+int vla11_lcd_dsi_write(struct display_state *state, const u8 *payload,
+			unsigned int length, bool lpm)
+{
+	struct dw_mipi_dsi2 *dsi2;
+	struct mipi_dsi_msg msg = { 0 };
+	int ret;
+
+	if (!payload || length != 1 || !lpm)
+		return -EINVAL;
+	switch (payload[0]) {
+	case 0x11:
+	case 0x29:
+	case 0x13:
+	case 0x20:
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+	ret = vla11_lcd_host(state, &dsi2);
+	if (ret)
+		return ret;
+	msg.channel = dsi2->channel;
+	msg.flags = MIPI_DSI_MSG_USE_LPM;
+	msg.tx_buf = payload;
+	msg.tx_len = length;
+	msg.type = MIPI_DSI_DCS_SHORT_WRITE;
+	return vla11_lcd_xfer(state, &msg, VLA11_LCD_WRITE_TIMEOUT_US);
+}
+
+#endif
 
 static void dw_mipi_dsi2_ipi_color_coding_cfg(struct dw_mipi_dsi2 *dsi2)
 {

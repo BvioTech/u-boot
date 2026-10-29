@@ -39,6 +39,12 @@
 #include <dm/ofnode.h>
 #include <asm/io.h>
 
+#if defined(CONFIG_VIOLOOP_VLA11_LCD_RECOVERY) && \
+    defined(CONFIG_TARGET_VIOLOOP_RK3576_VLA11) && \
+    !defined(CONFIG_SPL_BUILD) && !defined(CONFIG_TPL_BUILD)
+#include <violoop_lcd_recovery.h>
+#endif
+
 #define DRIVER_VERSION	"v1.0.1"
 
 /***********************************************************************
@@ -937,6 +943,18 @@ static int display_enable(struct display_state *state)
 
 	state->is_enable = true;
 
+#if defined(CONFIG_VIOLOOP_VLA11_LCD_RECOVERY) && \
+    defined(CONFIG_TARGET_VIOLOOP_RK3576_VLA11) && \
+    !defined(CONFIG_SPL_BUILD) && !defined(CONFIG_TPL_BUILD)
+	{
+		int lcd_ret = vla11_lcd_recovery_check(state);
+
+		if (lcd_ret && lcd_ret != -EINPROGRESS)
+			printf("VLA11 LCD health: result=%d; continue boot\n",
+			       lcd_ret);
+	}
+#endif
+
 	return 0;
 }
 
@@ -1123,6 +1141,29 @@ static int display_logo(struct display_state *state)
 
 	return 0;
 }
+
+#if defined(CONFIG_VIOLOOP_VLA11_LCD_RECOVERY) && \
+    defined(CONFIG_TARGET_VIOLOOP_RK3576_VLA11) && \
+    !defined(CONFIG_SPL_BUILD) && !defined(CONFIG_TPL_BUILD)
+int vla11_lcd_reinit_logo(struct display_state *state)
+{
+	int ret;
+
+	if (!state || !state->is_enable ||
+	    state->conn_state.type != DRM_MODE_CONNECTOR_DSI ||
+	    !state->logo.mem || !state->logo.width || !state->logo.height)
+		return -EINVAL;
+	ret = display_disable(state);
+	if (ret)
+		return ret;
+	state->enabled_at_spl = false;
+	/* display_disable clears is_init: rebuild mode and plane as well. */
+	ret = display_logo(state);
+	if (ret)
+		return ret;
+	return state->is_init && state->is_enable ? 0 : -EIO;
+}
+#endif
 
 static int display_bmp(struct display_state *state)
 {

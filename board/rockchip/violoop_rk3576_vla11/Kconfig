@@ -12,4 +12,15 @@ config SYS_CONFIG_NAME
 config BOARD_SPECIFIC_OPTIONS
 	def_bool y
 
+config VIOLOOP_VLA11_LCD_RECOVERY
+	bool "Check and recover VLA11 LCD state after Logo output starts"
+	depends on OF_BOARD_SETUP && DRM_ROCKCHIP
+	depends on DRM_ROCKCHIP_DW_MIPI_DSI2 && DRM_ROCKCHIP_PANEL
+	default n
+	help
+	  Perform one bounded, panel-ID-qualified LCD status check after the
+	  VLA11 Logo data stream starts. Recover verified image/power-mode
+	  faults and pass the diagnostic report to Linux through /chosen.
+	  The feature is excluded from SPL/TPL and leaves other boards alone.
+
 endif

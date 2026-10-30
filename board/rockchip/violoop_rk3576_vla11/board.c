@@ -16,6 +16,12 @@
 #include <asm/io.h>
 #include <rockusb.h>
 
+#if defined(CONFIG_VIOLOOP_VLA11_LCD_RECOVERY) && \
+    defined(CONFIG_TARGET_VIOLOOP_RK3576_VLA11) && \
+    !defined(CONFIG_SPL_BUILD) && !defined(CONFIG_TPL_BUILD)
+#include <violoop_lcd_recovery.h>
+#endif
+
 DECLARE_GLOBAL_DATA_PTR;
 
 /*
@@ -175,6 +181,40 @@ static enum vla11_lcd_type vla11_classify_lcd(unsigned int raw)
 	return VLA11_LCD_UNKNOWN;
 }
 
+#if defined(CONFIG_VIOLOOP_VLA11_LCD_RECOVERY) && \
+    defined(CONFIG_TARGET_VIOLOOP_RK3576_VLA11) && \
+    !defined(CONFIG_SPL_BUILD) && !defined(CONFIG_TPL_BUILD)
+static bool vla11_lcd_id_cached;
+static unsigned int vla11_lcd_id_raw;
+
+int vla11_lcd_boot_identity(unsigned int *raw,
+			   enum vla11_lcd_profile *profile)
+{
+	enum vla11_lcd_type type;
+	int ret;
+
+	if (!raw || !profile)
+		return -EINVAL;
+	*profile = VLA11_LCD_PROFILE_UNKNOWN;
+	if (!vla11_lcd_id_cached) {
+		ret = vla11_read_lcd_id(&vla11_lcd_id_raw);
+		if (ret)
+			return ret;
+		if (vla11_lcd_id_raw > 4095)
+			return -ERANGE;
+		type = vla11_classify_lcd(vla11_lcd_id_raw);
+		if (type == VLA11_LCD_UNKNOWN)
+			return -ENODEV;
+		vla11_lcd_id_cached = true;
+	}
+	*raw = vla11_lcd_id_raw;
+	type = vla11_classify_lcd(*raw);
+	*profile = type == VLA11_LCD_FPT ? VLA11_LCD_PROFILE_FPT :
+		   VLA11_LCD_PROFILE_JUJING;
+	return 0;
+}
+#endif
+
 static int vla11_find_panel(void *blob)
 {
 	int node;
@@ -308,6 +348,14 @@ int ft_board_setup(void *blob, bd_t *bd)
 	int ret;
 
 	(void)bd;
+#if defined(CONFIG_VIOLOOP_VLA11_LCD_RECOVERY) && \
+    defined(CONFIG_TARGET_VIOLOOP_RK3576_VLA11) && \
+    !defined(CONFIG_SPL_BUILD) && !defined(CONFIG_TPL_BUILD)
+	if (vla11_lcd_id_cached) {
+		raw = vla11_lcd_id_raw;
+		ret = 0;
+	} else
+#endif
 	ret = vla11_read_lcd_id(&raw);
 	if (ret) {
 		/*
@@ -334,6 +382,11 @@ int ft_board_setup(void *blob, bd_t *bd)
 	if (panel < 0 || fpt_touch < 0 || jujing_touch < 0) {
 		printf("VLA11 LCD-ID: DT nodes missing (%d/%d/%d), keep fallback\n",
 		       panel, fpt_touch, jujing_touch);
+#if defined(CONFIG_VIOLOOP_VLA11_LCD_RECOVERY) && \
+    defined(CONFIG_TARGET_VIOLOOP_RK3576_VLA11) && \
+    !defined(CONFIG_SPL_BUILD) && !defined(CONFIG_TPL_BUILD)
+		vla11_lcd_recovery_report_fdt(blob);
+#endif
 		return 0;
 	}
 
@@ -389,6 +442,11 @@ int ft_board_setup(void *blob, bd_t *bd)
 
 	printf("VLA11 LCD-ID: ADC2 raw=%u, panel=%s\n", raw,
 	       vla11_lcd_name(type));
+#if defined(CONFIG_VIOLOOP_VLA11_LCD_RECOVERY) && \
+    defined(CONFIG_TARGET_VIOLOOP_RK3576_VLA11) && \
+    !defined(CONFIG_SPL_BUILD) && !defined(CONFIG_TPL_BUILD)
+	vla11_lcd_recovery_report_fdt(blob);
+#endif
 	return 0;
 }
 
